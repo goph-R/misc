@@ -3,7 +3,7 @@ load_backend: loaded RPC backend from D:\llama-cli\ggml-rpc.dll
 load_backend: loaded CPU backend from D:\llama-cli\ggml-cpu-haswell.dll
 
 Loading model...
-
+  
 ▄▄ ▄▄  
 ██ ██  
 ██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄  
@@ -11,7 +11,7 @@ Loading model...
 ██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀  
                                     ██    ██  
                                     ▀▀    ▀▀  
-
+  
 build      : b7951-22cae8321
 model      : qwen2.5-coder-7b-instruct-q4_k_m.gguf
 modalities : text
