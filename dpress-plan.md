@@ -788,23 +788,220 @@ close_after_days = 0
 api_url = https://dpress.dynart.net/api/v1/plugins
 ```
 
+## Implementation Phases (draft)
+
+### Phase 1 — Foundation
+
+Goal: a running application that can connect to the database and run migrations.
+
+- `composer.json` with all dependencies, autoload config
+- `config.ini` structure, `config.dev.ini`
+- `wwwroot/index.php` entry point wiring `Micro::run()`
+- `dynart-micro-entities` integration: `Database` service configured from `db.*` config keys
+- `MigrationService`: discovers and runs pending `.sql` files from `db-migrations/`, records in `#Db_Migration`
+  (with `namespace` column from day one)
+- `MigrateCommand` + `MigrateStatusCommand` CLI commands
+- `cli.php` entry point
+- First migration: all core tables
+- `SettingService`: cached `get(string $key, mixed $default)` / `set(string $key, mixed $value)`
+- `SlugService`: `generate(string $title): string` with uniqueness check
+- `.htaccess` with mod_rewrite rules
+- Basic `SeedCommand` (dev only) for a default admin user and sample content
+
+---
+
+### Phase 2 — Authentication & Users
+
+Goal: JWT login/logout, user management, RBAC in place.
+
+- `User`, `Role`, `Permission` entities + repositories
+- `UserRepository::findByEmail()`, `findByUuid()`
+- `AuthController`: `POST /admin/api/v1/auth/login` → validates credentials, returns signed JWT
+- `AuthController`: `POST /admin/api/v1/auth/logout` (stateless, client discards token)
+- `AdminAuthMiddleware`: wraps `dynart-micro` `JwtValidator`, guards all `/admin/api/v1/*` routes
+- `PermissionService::check(string $permission): bool`
+- `#[Authorize]` attribute applied to admin controllers via `dynart-micro` `JwtAuth`
+- Password hashing (PHP `password_hash` / `password_verify`)
+- Forgot password: `password_reset_token` generation + `EmailService::queue()` (email sending deferred to Phase 10)
+- `UserCreateCommand` CLI command (for bootstrapping the first admin)
+- Seed migration: built-in roles (`super_admin`, `admin`, `editor`, `author`, `contributor`, `subscriber`) and permissions
+
+---
+
+### Phase 3 — Content Core
+
+Goal: posts, pages, categories, tags fully manageable via admin API.
+
+- `Post`, `Page`, `Category`, `Tag`, `PostArchive`, `PageArchive` entities + repositories
+- `PostService`: create, update, publish, trash — emits events (`post:created`, `post:published`, etc.)
+- `PageService`: same lifecycle + events
+- `MarkdownService`: shortcode pass → `league/commonmark` → sanitized HTML
+- `ShortcodeService`: registry; built-in `[code]` shortcode with `scrivo/highlight.php`
+- `FormFactory` and `ListFactory` with event emissions (`*:created`, `*:queryPrepared`) — plugin hooks in place even
+  though no plugins exist yet
+- Admin API endpoints:
+  - `GET/POST /admin/api/v1/posts`, `GET/PUT/DELETE /admin/api/v1/posts/{uuid}`
+  - `GET/POST /admin/api/v1/pages`, `GET/PUT/DELETE /admin/api/v1/pages/{uuid}`
+  - `GET/POST /admin/api/v1/categories`, `GET/PUT/DELETE /admin/api/v1/categories/{uuid}`
+  - `GET/POST /admin/api/v1/tags`, `GET/PUT/DELETE /admin/api/v1/tags/{uuid}`
+- Slug auto-generation on create; uniqueness enforced
+- Version archiving: every save of a post/page creates a `#Post_Archive` / `#Page_Archive` row (atomic, in a transaction)
+- Scheduled post support: `status = scheduled` + `published_at`
+- `CronCommand` stub (activates scheduled posts; extended in Phase 10)
+
+---
+
+### Phase 4 — Media
+
+Goal: file uploads work, images have thumbnails, media library browsable.
+
+- `Media` entity + repository
+- `MediaService`: upload, mime/size validation, UUID-based storage path, thumbnail generation with GD
+- Image sizes registered via config (`upload.thumbnail_sizes`)
+- Virtual folder support via `#Media.parent_uuid`
+- Admin API endpoints:
+  - `POST /admin/api/v1/media` (multipart upload)
+  - `GET /admin/api/v1/media` (list with folder/type filter)
+  - `DELETE /admin/api/v1/media/{uuid}`
+- Storage driver interface (local default; S3-compatible deferred to plugins)
+
+---
+
+### Phase 5 — Public Frontend
+
+Goal: a fully working server-side rendered public site.
+
+- `HomeController`: paginated post list
+- `PostController`: single post, archive, category archive, tag archive, author archive
+- `PageController`: static pages resolved by slug
+- `SearchController` + `SearchService`: fulltext search with MariaDB `FULLTEXT` index
+- `RedirectMiddleware`: processes `#Redirect` table on each request
+- Theme system: `ThemeService`, `functions.php` auto-load, template hierarchy fallback chain
+- Default theme: `layout.phtml`, `home.phtml`, `single.phtml`, `page.phtml`, `archive.phtml`,
+  `category.phtml`, `tag.phtml`, `author.phtml`, `search.phtml`, `404.phtml`, `pager.phtml`
+- `SeoService`: meta tags, Open Graph, Twitter Card, JSON-LD, canonical URL — used in all public templates
+- `MaintenanceModeMiddleware`
+
+---
+
+### Phase 6 — Admin SPA
+
+Goal: usable admin interface for all content management.
+
+- React + shadcn project scaffolding in `wwwroot/admin/`
+- PHP wildcard catch-all `/admin/*` → serves SPA shell
+- SPA views:
+  - Login
+  - Dashboard (post/comment/media counts, recent activity)
+  - Post list + editor (CodeMirror Markdown, live preview, media picker)
+  - Page list + editor
+  - Category list + form
+  - Tag list + form
+  - Media library (grid, upload, folder navigation)
+  - Settings (general, reading, writing, mail, permalink)
+  - User list + form
+- JWT stored in memory or `localStorage`; attached as `Authorization: Bearer` on all API requests
+- Build output committed to `wwwroot/admin/` or generated by CI
+
+---
+
+### Phase 7 — Comments
+
+Goal: threaded public comments with admin moderation.
+
+- `Comment` entity + repository
+- `CommentController` (public): `POST /comments` — CSRF, honeypot, auto-approve logic
+- Threaded display in `single.phtml` up to `comments.max_depth`
+- Admin API: `GET/PUT/DELETE /admin/api/v1/comments` (approve, spam, trash, bulk actions)
+- Admin SPA: comment moderation list
+- `comment:before_save` event (plugin hook for Akismet etc.)
+
+---
+
+### Phase 8 — RSS, Sitemap & Feeds
+
+Goal: feed autodiscovery and sitemap for SEO/indexing.
+
+- `RssService` + `FeedController`: `/feed`, `/feed/atom`, per-category/tag/author feeds
+- Feed autodiscovery `<link>` tags in all public `<head>` output
+- `SitemapService` + `SitemapController`: `/sitemap.xml` index + sub-sitemaps
+- `robots.txt` with `Sitemap:` directive
+- Auto-ping on publish (optional, setting-controlled, via `post:published` event)
+
+---
+
+### Phase 9 — Caching & Performance
+
+Goal: anonymous public pages served from cache; cache invalidated on content changes.
+
+- `CacheService`: file-based driver, `get/set/delete/flush(prefix)`
+- `CacheMiddleware`: intercepts anonymous requests before routing
+- Cache invalidation wired into `PostService`, `CommentService`, `SettingService` via events
+- `CacheClearCommand` CLI command
+- Admin and authenticated requests always bypass cache
+
+---
+
+### Phase 10 — Email, Cron & Notifications
+
+Goal: email notifications sent reliably; scheduled tasks run automatically.
+
+- `EmailService`: `mail()` default driver, SMTP driver, `queue()` → `#Email_Log`
+- Email templates: comment notification, comment approved, password reset, new user
+- `CronCommand` extended: dispatch email queue, publish scheduled posts, auto-trash old spam, refresh sitemap cache
+- System cron entry documented (`* * * * * php /path/to/cli.php cron`)
+- Menus: `Menu`, `MenuItem` entities + repositories, admin API endpoints, SPA menu editor, frontend rendering
+- Redirects: admin API + SPA UI for `#Redirect` management
+- Audit log: `AuditService` wired into key service events
+
+---
+
+### Phase 11 — Import / Export
+
+Goal: content can be backed up and migrated.
+
+- `ExportCommand`: dumps posts, pages, categories, tags, settings to DPress JSON
+- `ImportCommand`: parses DPress JSON or WordPress WXR, creates entities, re-maps UUIDs
+- Media import: download linked images or accept a ZIP bundle
+
+---
+
+### Phase 12 — Plugins *(deferred)*
+
+Goal: third-party extensions without modifying core.
+
+- `AbstractPlugin` lifecycle contract (`install`, `activate`, `deactivate`, `uninstall`)
+- `PluginRegistry`: discovers `plugins/*/plugin.json`, checks `#Plugin` table, loads active plugins
+- `PluginService`: install from GitHub ZIP, activate, deactivate
+- Plugin CLI commands: `plugin:install`, `plugin:activate`, `plugin:deactivate`, `plugin:list`
+- Admin SPA: plugin management page
+- Update check against `https://dpress.dynart.net/api/v1/plugins`
+- Dependency resolution (`requires` in `plugin.json`)
+
+> Note: event hooks, `FormFactory`/`ListFactory` emissions, and `#Db_Migration.namespace` are in place from
+> Phase 3 onward, so this phase is purely additive — no core refactoring needed.
+
+---
+
 ## Composer Dependencies (draft)
 
 ```json
-"require": {
-    "dynart/micro": "^0.8",
-    "dynart/micro-entities": "^1.0",
-    "firebase/php-jwt": "^7.0",
-    "league/commonmark": "^2.0",
-    "scrivo/highlight.php": "^9.0",
-    "ramsey/uuid": "^4.0",
-    "ext-pdo": "*",
-    "ext-gd": "*",
-    "ext-mbstring": "*",
-    "ext-json": "*"
-},
-"require-dev": {
-    "phpunit/phpunit": "^9.5",
-    "fakerphp/faker": "^1.0"
+{
+    "require": {
+        "dynart/micro": "^0.8",
+        "dynart/micro-entities": "^1.0",
+        "firebase/php-jwt": "^7.0",
+        "league/commonmark": "^2.0",
+        "scrivo/highlight.php": "^9.0",
+        "ramsey/uuid": "^4.0",
+        "ext-pdo": "*",
+        "ext-gd": "*",
+        "ext-mbstring": "*",
+        "ext-json": "*"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^9.5",
+        "fakerphp/faker": "^1.0"
+    }
 }
 ```
